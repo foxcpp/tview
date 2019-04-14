@@ -225,7 +225,7 @@ func (t *TextView) SetScrollable(scrollable bool) *TextView {
 // beyond the available width are not displayed.
 func (t *TextView) SetWrap(wrap bool) *TextView {
 	if t.wrap != wrap {
-		t.index = nil
+		t.rebuildIndex()
 	}
 	t.wrap = wrap
 	return t
@@ -238,7 +238,7 @@ func (t *TextView) SetWrap(wrap bool) *TextView {
 // This flag is ignored if the "wrap" flag is false.
 func (t *TextView) SetWordWrap(wrapOnWords bool) *TextView {
 	if t.wordWrap != wrapOnWords {
-		t.index = nil
+		t.rebuildIndex()
 	}
 	t.wordWrap = wrapOnWords
 	return t
@@ -247,9 +247,6 @@ func (t *TextView) SetWordWrap(wrapOnWords bool) *TextView {
 // SetTextAlign sets the text alignment within the text view. This must be
 // either AlignLeft, AlignCenter, or AlignRight.
 func (t *TextView) SetTextAlign(align int) *TextView {
-	if t.align != align {
-		t.index = nil
-	}
 	t.align = align
 	return t
 }
@@ -302,7 +299,7 @@ func (t *TextView) GetText(stripTags bool) string {
 // dynamically. See class description for details.
 func (t *TextView) SetDynamicColors(dynamic bool) *TextView {
 	if t.dynamicColors != dynamic {
-		t.index = nil
+		t.rebuildIndex()
 	}
 	t.dynamicColors = dynamic
 	return t
@@ -312,7 +309,7 @@ func (t *TextView) SetDynamicColors(dynamic bool) *TextView {
 // description for details.
 func (t *TextView) SetRegions(regions bool) *TextView {
 	if t.regions != regions {
-		t.index = nil
+		t.rebuildIndex()
 	}
 	t.regions = regions
 	return t
@@ -404,7 +401,7 @@ func (t *TextView) GetScrollOffset() (row, column int) {
 func (t *TextView) Clear() *TextView {
 	t.buffer = nil
 	t.recentBytes = nil
-	t.index = nil
+	t.rebuildIndex()
 	return t
 }
 
@@ -465,7 +462,8 @@ func (t *TextView) Highlight(regionIDs ...string) *TextView {
 		}
 		t.highlights[id] = struct{}{}
 	}
-	t.index = nil
+
+	t.rebuildIndex()
 
 	// Notify.
 	if t.highlighted != nil && len(added) > 0 || len(removed) > 0 {
@@ -504,7 +502,7 @@ func (t *TextView) ScrollToHighlight() *TextView {
 	if len(t.highlights) == 0 || !t.scrollable || !t.regions {
 		return t
 	}
-	t.index = nil
+	t.rebuildIndex()
 	t.scrollToHighlights = true
 	t.trackEnd = false
 	return t
@@ -660,34 +658,48 @@ func (t *TextView) Write(p []byte) (n int, err error) {
 		}
 	}
 
-	// Reset the index.
-	t.index = nil
+	// Index the new bytes
+	t.appendIndex()
 
 	return len(p), nil
 }
 
-// reindexBuffer re-indexes the buffer such that we can use it to easily draw
-// the buffer onto the screen. Each line in the index will contain a pointer
-// into the buffer from which on we will print text. It will also contain the
-// color with which the line starts.
-func (t *TextView) reindexBuffer(width int) {
-	if t.index != nil {
-		return // Nothing has changed. We can still use the current index.
-	}
-	t.index = nil
-	t.fromHighlight, t.toHighlight, t.posHighlight = -1, -1, -1
-
-	// If there's no space, there's no index.
-	if width < 1 {
+// appendIndex indexes the new buffer data such that we can use it to easily
+// draw the buffer onto the screen. Each line in the index will contain a
+// pointer into the buffer from which on we will print text. It will also
+// contain the color with which the line starts.
+func (t *TextView) appendIndex() {
+	// The width is unknown, the index cannot be appended
+	if t.lastWidth == 0 && t.wrap {
 		return
+	}
+
+	var lastIndex textViewIndex
+	if len(t.index) > 0 {
+		// Pop the last index, it will be regenerated
+		lastIndex = *(t.index[len(t.index)-1])
+		t.index = t.index[:len(t.index)-1]
 	}
 
 	// Initial states.
 	regionID := ""
 	var highlighted bool
 
-	// Go through each line in the buffer.
-	for bufferIndex, str := range t.buffer {
+	for bufferIndex := lastIndex.Line; bufferIndex < len(t.buffer); bufferIndex++ {
+		var (
+			originalPos, offset int
+			str                 string
+		)
+		if bufferIndex == lastIndex.Line {
+			// Start from the last index line
+			str = t.buffer[bufferIndex][lastIndex.Pos:]
+			originalPos = lastIndex.Pos
+			// Offset used for the tagEnd-related calculations, since they are
+			// now relative to the last indexed line
+			offset = lastIndex.Pos
+		} else {
+			str = t.buffer[bufferIndex]
+		}
 		colorTagIndices, colorTags, regionIndices, regions, escapeIndices, strippedStr, _ := decomposeString(str, t.dynamicColors, t.regions)
 
 		// Split the line if required.
@@ -695,7 +707,7 @@ func (t *TextView) reindexBuffer(width int) {
 		str = strippedStr
 		if t.wrap && len(str) > 0 {
 			for len(str) > 0 {
-				extract := runewidth.Truncate(str, width, "")
+				extract := runewidth.Truncate(str, t.lastWidth, "")
 				if len(extract) == 0 {
 					// We'll extract at least one grapheme cluster.
 					gr := uniseg.NewGraphemes(str)
@@ -726,7 +738,7 @@ func (t *TextView) reindexBuffer(width int) {
 
 		// Create index from split lines.
 		var (
-			originalPos, colorPos, regionPos, escapePos  int
+			colorPos, regionPos, escapePos               int
 			foregroundColor, backgroundColor, attributes string
 		)
 		for _, splitLine := range splitLines {
@@ -742,7 +754,7 @@ func (t *TextView) reindexBuffer(width int) {
 			// Shift original position with tags.
 			lineLength := len(splitLine)
 			remainingLength := lineLength
-			tagEnd := originalPos
+			tagEnd := originalPos - offset
 			totalTagLength := 0
 			for {
 				// Which tag comes next?
@@ -771,14 +783,14 @@ func (t *TextView) reindexBuffer(width int) {
 				}
 
 				// Advance.
-				strippedTagStart := nextTag[tagIndex][0] - originalPos - totalTagLength
+				strippedTagStart := nextTag[tagIndex][0] - originalPos - totalTagLength + offset
 				tagEnd = nextTag[tagIndex][1]
 				tagLength := tagEnd - nextTag[tagIndex][0]
 				if nextTag[tagIndex][2] == 2 {
 					tagLength = 1
 				}
 				totalTagLength += tagLength
-				remainingLength = lineLength - (tagEnd - originalPos - totalTagLength)
+				remainingLength = lineLength - (tagEnd - originalPos - totalTagLength + offset)
 
 				// Process the tag.
 				switch nextTag[tagIndex][2] {
@@ -816,6 +828,10 @@ func (t *TextView) reindexBuffer(width int) {
 			line.NextPos = originalPos
 			line.Width = stringWidth(splitLine)
 			t.index = append(t.index, line)
+
+			if line.Width > t.longestLine {
+				t.longestLine = line.Width
+			}
 		}
 
 		// Word-wrapped lines may have trailing whitespace. Remove it.
@@ -832,14 +848,14 @@ func (t *TextView) reindexBuffer(width int) {
 			}
 		}
 	}
+}
 
-	// Calculate longest line.
+// rebuildIndex clears and rebuilds the index
+func (t *TextView) rebuildIndex() {
+	t.index = nil
 	t.longestLine = 0
-	for _, line := range t.index {
-		if line.Width > t.longestLine {
-			t.longestLine = line.Width
-		}
-	}
+
+	t.appendIndex()
 }
 
 // Draw draws this primitive onto the screen.
@@ -855,14 +871,8 @@ func (t *TextView) Draw(screen tcell.Screen) {
 
 	// If the width has changed, we need to reindex.
 	if width != t.lastWidth && t.wrap {
-		t.index = nil
-	}
-	t.lastWidth = width
-
-	// Re-index.
-	t.reindexBuffer(width)
-	if t.regions {
-		t.regionInfos = nil
+		t.lastWidth = width
+		t.rebuildIndex()
 	}
 
 	// If we don't have an index, there's nothing to draw.
@@ -1079,8 +1089,8 @@ func (t *TextView) Draw(screen tcell.Screen) {
 		} else {
 			t.buffer = t.buffer[t.index[t.lineOffset].Line:]
 		}
-		t.index = nil
 		t.lineOffset = 0
+		t.rebuildIndex()
 	}
 }
 
