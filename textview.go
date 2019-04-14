@@ -700,7 +700,7 @@ func (t *TextView) appendIndex() {
 		} else {
 			str = t.buffer[bufferIndex]
 		}
-		colorTagIndices, colorTags, regionIndices, regions, escapeIndices, strippedStr, _ := decomposeString(str, t.dynamicColors, t.regions)
+		colorTagIndices, colorTags, regionIndices, regions, escapeIndices, strippedStr, _ := decomposeString(str, t.dynamicColors, t.regions, false)
 
 		// Split the line if required.
 		var splitLines []string
@@ -969,7 +969,7 @@ func (t *TextView) Draw(screen tcell.Screen) {
 		}
 
 		// Process tags.
-		colorTagIndices, colorTags, regionIndices, regions, escapeIndices, strippedText, _ := decomposeString(text, t.dynamicColors, t.regions)
+		colorTagIndices, colorTags, regionIndices, regions, escapeIndices, strippedText, _ := decomposeString(text, t.dynamicColors, t.regions, false)
 
 		// Calculate the position of the line.
 		var skip, posX int
